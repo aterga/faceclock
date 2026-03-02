@@ -1,0 +1,22 @@
+{
+  "canisters": {
+    "faceclock_backend": {
+      "candid": "src/faceclock_backend/faceclock_backend.did",
+      "package": "faceclock_backend",
+      "type": "rust"
+    },
+    "faceclock_frontend": {
+      "dependencies": ["faceclock_backend"],
+      "source": ["src/faceclock_frontend/assets"],
+      "type": "assets"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}

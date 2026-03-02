@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="FaceClock — AI-powered age prediction using your webcam on the Internet Computer">
+    <title>FaceClock — Age Prediction</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-icon">⏱</span>
+                <h1>Face<span class="accent">Clock</span></h1>
+            </div>
+            <p class="tagline">AI Age Prediction · Powered by the Internet Computer</p>
+        </header>
+
+        <!-- Main Scanner Area -->
+        <main class="scanner-area">
+            <!-- Video Container -->
+            <div class="video-container" id="videoContainer">
+                <video id="webcam" autoplay muted playsinline></video>
+                <canvas id="overlay"></canvas>
+
+                <!-- Scanning Frame -->
+                <div class="scan-frame" id="scanFrame">
+                    <div class="corner top-left"></div>
+                    <div class="corner top-right"></div>
+                    <div class="corner bottom-left"></div>
+                    <div class="corner bottom-right"></div>
+                    <div class="scan-line" id="scanLine"></div>
+                </div>
+
+                <!-- Status Badge -->
+                <div class="status-badge" id="statusBadge">
+                    <span class="status-dot"></span>
+                    <span class="status-text" id="statusText">Initializing...</span>
+                </div>
+
+                <!-- Progress Ring -->
+                <div class="progress-ring-container" id="progressRing" style="display:none;">
+                    <svg class="progress-ring" viewBox="0 0 120 120">
+                        <circle class="progress-ring-bg" cx="60" cy="60" r="54" />
+                        <circle class="progress-ring-fill" cx="60" cy="60" r="54" id="progressCircle" />
+                    </svg>
+                    <span class="progress-text" id="progressText">0%</span>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="controls">
+                <button class="btn btn-primary" id="startBtn" disabled>
+                    <span class="btn-icon">📸</span>
+                    Start Scanning
+                </button>
+                <button class="btn btn-secondary" id="resetBtn" style="display:none;">
+                    <span class="btn-icon">🔄</span>
+                    Scan Again
+                </button>
+            </div>
+        </main>
+
+        <!-- Result Display -->
+        <section class="result-section" id="resultSection" style="display:none;">
+            <div class="result-card">
+                <div class="result-glow"></div>
+                <div class="result-content">
+                    <p class="result-label">Predicted Age</p>
+                    <div class="result-age" id="resultAge">--</div>
+                    <div class="result-meta">
+                        <div class="meta-item">
+                            <span class="meta-label">Confidence</span>
+                            <span class="meta-value" id="resultConfidence">--%</span>
+                        </div>
+                        <div class="meta-item">
+                            <span class="meta-label">Frames Analyzed</span>
+                            <span class="meta-value" id="resultFrames">--</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Info Section -->
+        <section class="info-section">
+            <div class="info-card">
+                <span class="info-icon">🔒</span>
+                <h3>Private</h3>
+                <p>Face detection runs locally in your browser. No images are stored.</p>
+            </div>
+            <div class="info-card">
+                <span class="info-icon">🧠</span>
+                <h3>On-Chain AI</h3>
+                <p>Age prediction is computed by an Internet Computer canister.</p>
+            </div>
+            <div class="info-card">
+                <span class="info-icon">🛡️</span>
+                <h3>Open Source</h3>
+                <p>Built with face-api.js and ICP. Fully transparent.</p>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>FaceClock · Running on the Internet Computer · All processing is ephemeral</p>
+        </footer>
+    </div>
+
+    <script src="face-api.min.js"></script>
+    <script type="module" src="app.js"></script>
+</body>
+
+</html>
