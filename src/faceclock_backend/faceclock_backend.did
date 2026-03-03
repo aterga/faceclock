@@ -1,14 +1,3 @@
-type FrameData = record {
-  age_estimate : float64;
-  confidence : float64;
-};
-
-type AgeResult = record {
-  predicted_age : float64;
-  confidence : float64;
-  frames_used : nat32;
-};
-
 service : {
-  "predict_age" : (vec FrameData) -> (AgeResult);
+  "predict_age_from_image" : (vec nat8) -> (float64);
 }

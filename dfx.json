@@ -3,11 +3,21 @@
     "faceclock_backend": {
       "candid": "src/faceclock_backend/faceclock_backend.did",
       "package": "faceclock_backend",
-      "type": "rust"
+      "type": "custom",
+      "wasm": "faceclock_backend.wasm.gz",
+      "build": [
+        "cargo build --manifest-path src/faceclock_backend/Cargo.toml --target wasm32-unknown-unknown --release",
+        "ic-wasm target/wasm32-unknown-unknown/release/faceclock_backend.wasm -o ./faceclock_backend.wasm shrink",
+        "gzip --best --no-name --force faceclock_backend.wasm"
+      ]
     },
     "faceclock_frontend": {
-      "dependencies": ["faceclock_backend"],
-      "source": ["src/faceclock_frontend/assets"],
+      "dependencies": [
+        "faceclock_backend"
+      ],
+      "source": [
+        "src/faceclock_frontend/assets"
+      ],
       "type": "assets"
     }
   },

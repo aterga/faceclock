@@ -17,13 +17,12 @@ import { HttpAgent, Actor } from 'https://esm.run/@dfinity/agent';
 // Configuration
 // ============================================================
 
-const BACKEND_CANISTER_ID = 'u6s2n-gx777-77774-qaaba-cai';
+const BACKEND_CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
 
 const CONFIG = {
-    SCAN_DURATION_MS: 3000,      // How long to scan
-    KEYFRAME_COUNT: 8,           // Number of keyframes to capture
+    SCAN_DURATION_MS: 2000,      // How long to scan
     MIN_FACE_CONFIDENCE: 0.5,    // Minimum face detection confidence
-    DETECTION_INTERVAL_MS: 150,  // How often to run detection
+    DETECTION_INTERVAL_MS: 300,  // How often to run detection (less frequent now since we just need one good crop)
     MODEL_PATH: './models',      // Path to face-api.js model weights
 };
 
@@ -84,9 +83,8 @@ async function init() {
     setStatus('Loading AI models...', '');
 
     try {
-        // Load face-api.js models
+        // Load face-api.js models (only detection now)
         await faceapi.nets.tinyFaceDetector.loadFromUri(CONFIG.MODEL_PATH);
-        await faceapi.nets.ageGenderNet.loadFromUri(CONFIG.MODEL_PATH);
         state.modelsLoaded = true;
         setStatus('Starting camera...', '');
     } catch (err) {
@@ -143,29 +141,40 @@ async function detectFace() {
         .detectSingleFace(webcam, new faceapi.TinyFaceDetectorOptions({
             inputSize: 320,
             scoreThreshold: CONFIG.MIN_FACE_CONFIDENCE,
-        }))
-        .withAgeAndGender();
+        }));
 
     if (detection) {
         // Draw face bounding box
-        const box = detection.detection.box;
+        const box = detection.box;
         ctx.strokeStyle = '#a29bfe';
         ctx.lineWidth = 2;
         ctx.strokeRect(box.x, box.y, box.width, box.height);
 
-        // Draw age estimate label
-        const age = Math.round(detection.age);
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-        ctx.fillRect(box.x, box.y - 26, 90, 24);
-        ctx.fillStyle = '#a29bfe';
-        ctx.font = '14px Outfit, sans-serif';
-        ctx.fillText(`Age: ~${age}`, box.x + 6, box.y - 8);
-
-        // Record frame data
+        // Record frame data (crop the face)
         if (state.scanStartTime) {
+
+            // Extract face image crop onto a temporary hidden canvas
+            const cropCanvas = document.createElement('canvas');
+            // Expand the bounding box slightly to capture full head context
+            const padX = box.width * 0.2;
+            const padY = box.height * 0.2;
+            const sx = Math.max(0, box.x - padX);
+            const sy = Math.max(0, box.y - padY);
+            const sw = Math.min(webcam.videoWidth - sx, box.width + padX * 2);
+            const sh = Math.min(webcam.videoHeight - sy, box.height + padY * 2);
+
+            cropCanvas.width = sw;
+            cropCanvas.height = sh;
+            const cropCtx = cropCanvas.getContext('2d');
+            cropCtx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw, sh);
+
+            // Get JPEG blob
+            const dataUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
+
             state.frameData.push({
-                age_estimate: detection.age,
-                confidence: detection.detection.score,
+                image_data: dataUrl,
+                confidence: detection.score,
+                size: sw * sh
             });
 
             // Update progress
@@ -174,7 +183,7 @@ async function detectFace() {
             setProgress(progress);
 
             // Check if scan is complete
-            if (elapsed >= CONFIG.SCAN_DURATION_MS && state.frameData.length >= CONFIG.KEYFRAME_COUNT) {
+            if (elapsed >= CONFIG.SCAN_DURATION_MS && state.frameData.length > 0) {
                 finishScanning();
                 return;
             }
@@ -233,14 +242,27 @@ async function finishScanning() {
     ctx.clearRect(0, 0, overlay.width, overlay.height);
 
     try {
-        // Select keyframes (evenly spaced)
-        const keyframes = selectKeyframes(state.frameData, CONFIG.KEYFRAME_COUNT);
+        if (state.frameData.length === 0) throw new Error("No face captured");
+
+        // Select the "best" frame (highest score/size combination)
+        state.frameData.sort((a, b) => (b.confidence * b.size) - (a.confidence * a.size));
+        const bestImageObj = state.frameData[0];
+
+        // Convert to UInt8Array for backend
+        const res = await fetch(bestImageObj.image_data);
+        const blob = await res.blob();
+        const arrayBuffer = await blob.arrayBuffer();
+        const imageBytes = new Uint8Array(arrayBuffer);
 
         // Call backend canister
-        const result = await callBackend(keyframes);
+        const resultAge = await callBackend(imageBytes);
 
-        // Display result
-        showResult(result);
+        // Display result (Mocking confidence/frames used for the UI structure)
+        showResult({
+            predicted_age: resultAge,
+            confidence: bestImageObj.confidence,
+            frames_used: 1 // We sent 1 image to the backend
+        });
         setStatus('Prediction complete!', 'done');
     } catch (err) {
         console.error('Prediction failed:', err);
@@ -249,16 +271,10 @@ async function finishScanning() {
     }
 }
 
-function selectKeyframes(frames, count) {
-    if (frames.length <= count) return frames;
-
-    const step = frames.length / count;
-    const selected = [];
-    for (let i = 0; i < count; i++) {
-        selected.push(frames[Math.floor(i * step)]);
-    }
-    return selected;
-}
+// ============================================================
+// Utility / Helpers
+// ============================================================
+// (Removed selectKeyframes since we only send 1 best crop now)
 
 function reset() {
     resultSection.style.display = 'none';
@@ -281,21 +297,12 @@ function reset() {
  * Candid Interface Definition
  */
 const idlFactory = ({ IDL }) => {
-    const FrameData = IDL.Record({
-        'age_estimate': IDL.Float64,
-        'confidence': IDL.Float64,
-    });
-    const AgeResult = IDL.Record({
-        'predicted_age': IDL.Float64,
-        'frames_used': IDL.Nat32,
-        'confidence': IDL.Float64,
-    });
     return IDL.Service({
-        'predict_age': IDL.Func([IDL.Vec(FrameData)], [AgeResult], []),
+        'predict_age_from_image': IDL.Func([IDL.Vec(IDL.Nat8)], [IDL.Float64], []),
     });
 };
 
-async function callBackend(frames) {
+async function callBackend(imageBytes) {
     setStatus('Predicting on-chain...', 'processing');
 
     try {
@@ -314,9 +321,9 @@ async function callBackend(frames) {
         });
 
         // Call the backend service
-        const result = await actor.predict_age(frames);
+        const ageResult = await actor.predict_age_from_image(imageBytes);
 
-        return result;
+        return ageResult;
     } catch (err) {
         console.error('Failed to call backend canister:', err);
         throw new Error('Could not reach ICP canister: ' + (err.message || 'Unknown network error.'));

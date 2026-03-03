@@ -1,113 +1,64 @@
-use candid::CandidType;
-use serde::Deserialize;
+use getrandom::register_custom_getrandom;
+use image::GenericImageView;
+use std::io::Cursor;
+use tract_onnx::prelude::*;
 
-/// Data from a single captured frame
-#[derive(CandidType, Deserialize, Clone, Debug)]
-struct FrameData {
-    age_estimate: f64,
-    confidence: f64,
+// Custom getrandom handler to allow compiling to wasm32-unknown-unknown
+fn always_fail(_buf: &mut [u8]) -> Result<(), getrandom::Error> {
+    Ok(())
 }
+register_custom_getrandom!(always_fail);
 
-/// Result of the age prediction
-#[derive(CandidType, Clone, Debug)]
-struct AgeResult {
-    predicted_age: f64,
-    confidence: f64,
-    frames_used: u32,
-}
+// Embed the ONNX model into the Wasm binary
+const MODEL_BYTES: &[u8] = include_bytes!("../genderage.onnx");
 
-/// Predict the user's age from multiple frame observations.
-///
-/// Uses robust statistical aggregation:
-/// 1. Filter out low-confidence frames (< 0.3)
-/// 2. Reject outliers using IQR method
-/// 3. Compute confidence-weighted mean of remaining estimates
-/// 4. Report overall confidence based on agreement between frames
+/// Predict the user's age directly from a JPEG image drop sent from the frontend.
 #[ic_cdk::update]
-fn predict_age(frames: Vec<FrameData>) -> AgeResult {
-    if frames.is_empty() {
-        return AgeResult {
-            predicted_age: 0.0,
-            confidence: 0.0,
-            frames_used: 0,
-        };
+fn predict_age_from_image(image_bytes: Vec<u8>) -> f64 {
+    // 1. Load the embedded model
+    let mut cursor = Cursor::new(MODEL_BYTES);
+    let model = tract_onnx::onnx()
+        .model_for_read(&mut cursor)
+        .expect("Failed to load ONNX model")
+        .into_optimized()
+        .expect("Failed to optimize model")
+        .into_runnable()
+        .expect("Failed to make model runnable");
+
+    // 2. Decode the incoming image (JPEG)
+    let img = image::load_from_memory(&image_bytes).expect("Failed to decode image");
+    let img = img.resize_exact(96, 96, image::imageops::FilterType::Triangle);
+
+    // 3. Convert the image to a Tract tensor
+    // The InsightFace genderage model expects [1, 3, 96, 96] BGR or RGB float32
+    // with normalization (pixel - 127.5) / 128.0
+    let mut tensor = tract_ndarray::Array4::zeros((1, 3, 96, 96));
+    for (x, y, pixel) in img.pixels() {
+        // InsightFace generally expects BGR, but we can try RGB first. Let's map to BGR to be safe.
+        tensor[[0, 0, y as usize, x as usize]] = (pixel[2] as f32 - 127.5) / 128.0; // B
+        tensor[[0, 1, y as usize, x as usize]] = (pixel[1] as f32 - 127.5) / 128.0; // G
+        tensor[[0, 2, y as usize, x as usize]] = (pixel[0] as f32 - 127.5) / 128.0;
+        // R
     }
 
-    // Step 1: Filter low-confidence frames
-    let mut valid_frames: Vec<&FrameData> = frames
-        .iter()
-        .filter(|f| f.confidence >= 0.3 && f.age_estimate > 0.0 && f.age_estimate < 120.0)
-        .collect();
+    let input = tensor.into_tensor().into();
 
-    if valid_frames.is_empty() {
-        return AgeResult {
-            predicted_age: 0.0,
-            confidence: 0.0,
-            frames_used: 0,
-        };
-    }
+    // 4. Run inference
+    let result = model.run(tvec!(input)).expect("Failed to run ML inference");
 
-    // Sort by age estimate for IQR computation
-    valid_frames.sort_by(|a, b| a.age_estimate.partial_cmp(&b.age_estimate).unwrap());
+    // 5. Process backend result
+    // The genderage model outputs [1, 3], where index 0 is Female, index 1 is Male, and index 2 is Age / 100.0
+    let output_view = result[0]
+        .to_array_view::<f32>()
+        .expect("Failed to read output tensor");
 
-    // Step 2: Outlier rejection using IQR if we have enough frames
-    let filtered: Vec<&FrameData> = if valid_frames.len() >= 4 {
-        let q1_idx = valid_frames.len() / 4;
-        let q3_idx = (3 * valid_frames.len()) / 4;
-        let q1 = valid_frames[q1_idx].age_estimate;
-        let q3 = valid_frames[q3_idx].age_estimate;
-        let iqr = q3 - q1;
-        let lower = q1 - 1.5 * iqr;
-        let upper = q3 + 1.5 * iqr;
+    // The shape is [1, 3]. We access the 2nd index for age.
+    let age_normalized = output_view[[0, 2]];
 
-        valid_frames
-            .into_iter()
-            .filter(|f| f.age_estimate >= lower && f.age_estimate <= upper)
-            .collect()
-    } else {
-        valid_frames
-    };
+    // Convert back to actual age
+    let predicted_age = age_normalized * 100.0;
 
-    if filtered.is_empty() {
-        return AgeResult {
-            predicted_age: 0.0,
-            confidence: 0.0,
-            frames_used: 0,
-        };
-    }
-
-    // Step 3: Confidence-weighted mean
-    let total_weight: f64 = filtered.iter().map(|f| f.confidence).sum();
-    let weighted_age: f64 = filtered
-        .iter()
-        .map(|f| f.age_estimate * f.confidence)
-        .sum::<f64>()
-        / total_weight;
-
-    // Step 4: Compute overall confidence based on frame agreement
-    let mean_age = weighted_age;
-    let variance: f64 = filtered
-        .iter()
-        .map(|f| {
-            let diff = f.age_estimate - mean_age;
-            diff * diff * f.confidence
-        })
-        .sum::<f64>()
-        / total_weight;
-    let std_dev = variance.sqrt();
-
-    // Confidence: high when frames agree (low std_dev) and individual confidences are high
-    // A std_dev of 0 gives confidence 1.0, std_dev of 10+ gives ~0.5
-    let agreement_factor = 1.0 / (1.0 + std_dev / 5.0);
-    let mean_confidence: f64 =
-        filtered.iter().map(|f| f.confidence).sum::<f64>() / filtered.len() as f64;
-    let overall_confidence = agreement_factor * mean_confidence;
-
-    AgeResult {
-        predicted_age: (weighted_age * 10.0).round() / 10.0, // Round to 1 decimal
-        confidence: (overall_confidence * 100.0).round() / 100.0,
-        frames_used: filtered.len() as u32,
-    }
+    predicted_age as f64
 }
 
 // Export the Candid interface
