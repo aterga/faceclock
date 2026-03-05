@@ -17,7 +17,17 @@ import { HttpAgent, Actor } from 'https://esm.run/@dfinity/agent';
 // Configuration
 // ============================================================
 
-const BACKEND_CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
+const MAINNET_BACKEND_CANISTER_ID = '7wdfo-wiaaa-aaaad-afevq-cai';
+const LOCAL_BACKEND_CANISTER_ID = 'ucwa4-rx777-77774-qaada-cai';
+
+const isMainnet = typeof window !== 'undefined' &&
+    (window.location.hostname.endsWith('.ic0.app') ||
+        window.location.hostname.endsWith('.icp0.io') ||
+        window.location.hostname.endsWith('.raw.icp0.io'));
+
+const BACKEND_CANISTER_ID = isMainnet
+    ? MAINNET_BACKEND_CANISTER_ID
+    : LOCAL_BACKEND_CANISTER_ID;
 
 const CONFIG = {
     SCAN_DURATION_MS: 2000,      // How long to scan
@@ -153,26 +163,44 @@ async function detectFace() {
         // Record frame data (crop the face)
         if (state.scanStartTime) {
 
-            // Extract face image crop onto a temporary hidden canvas
+            // Capture a generous crop around the detected face (2× bbox)
+            // The backend will apply InsightFace alignment using the face bbox coordinates
             const cropCanvas = document.createElement('canvas');
-            // Expand the bounding box slightly to capture full head context
-            const padX = box.width * 0.2;
-            const padY = box.height * 0.2;
-            const sx = Math.max(0, box.x - padX);
-            const sy = Math.max(0, box.y - padY);
-            const sw = Math.min(webcam.videoWidth - sx, box.width + padX * 2);
-            const sh = Math.min(webcam.videoHeight - sy, box.height + padY * 2);
+            const pad = Math.max(box.width, box.height);
+            const sx = Math.max(0, Math.floor(box.x - pad / 2));
+            const sy = Math.max(0, Math.floor(box.y - pad / 2));
+            const sw = Math.min(webcam.videoWidth - sx, Math.ceil(box.width + pad));
+            const sh = Math.min(webcam.videoHeight - sy, Math.ceil(box.height + pad));
 
-            cropCanvas.width = sw;
-            cropCanvas.height = sh;
+            // Limit crop to 256×256 max to keep canister payload reasonable
+            const MAX_CROP = 256;
+            const cropScale = Math.min(1.0, MAX_CROP / Math.max(sw, sh));
+            const cw = Math.round(sw * cropScale);
+            const ch = Math.round(sh * cropScale);
+
+            cropCanvas.width = cw;
+            cropCanvas.height = ch;
             const cropCtx = cropCanvas.getContext('2d');
-            cropCtx.drawImage(webcam, sx, sy, sw, sh, 0, 0, sw, sh);
+            cropCtx.drawImage(webcam, sx, sy, sw, sh, 0, 0, cw, ch);
 
-            // Get JPEG blob
-            const dataUrl = cropCanvas.toDataURL('image/jpeg', 0.9);
+            // Extract raw RGBA pixel data
+            const imageData = cropCtx.getImageData(0, 0, cw, ch);
+            const rgbaBytes = new Uint8Array(imageData.data.buffer);
+
+            // Face bbox relative to the crop origin, scaled proportionally
+            const faceX = (box.x - sx) * cropScale;
+            const faceY = (box.y - sy) * cropScale;
+            const faceW = box.width * cropScale;
+            const faceH = box.height * cropScale;
 
             state.frameData.push({
-                image_data: dataUrl,
+                image_data: rgbaBytes,
+                crop_width: cw,
+                crop_height: ch,
+                face_x: faceX,
+                face_y: faceY,
+                face_w: faceW,
+                face_h: faceH,
                 confidence: detection.score,
                 size: sw * sh
             });
@@ -248,14 +276,8 @@ async function finishScanning() {
         state.frameData.sort((a, b) => (b.confidence * b.size) - (a.confidence * a.size));
         const bestImageObj = state.frameData[0];
 
-        // Convert to UInt8Array for backend
-        const res = await fetch(bestImageObj.image_data);
-        const blob = await res.blob();
-        const arrayBuffer = await blob.arrayBuffer();
-        const imageBytes = new Uint8Array(arrayBuffer);
-
-        // Call backend canister
-        const resultAge = await callBackend(imageBytes);
+        // Send full crop + face bbox to backend for aligned inference
+        const resultAge = await callBackend(bestImageObj);
 
         // Display result (Mocking confidence/frames used for the UI structure)
         showResult({
@@ -299,10 +321,15 @@ function reset() {
 const idlFactory = ({ IDL }) => {
     return IDL.Service({
         'predict_age_from_image': IDL.Func([IDL.Vec(IDL.Nat8)], [IDL.Float64], []),
+        'predict_age_with_bbox': IDL.Func(
+            [IDL.Vec(IDL.Nat8), IDL.Nat32, IDL.Nat32, IDL.Float32, IDL.Float32, IDL.Float32, IDL.Float32],
+            [IDL.Float64],
+            []
+        ),
     });
 };
 
-async function callBackend(imageBytes) {
+async function callBackend(frameObj) {
     setStatus('Predicting on-chain...', 'processing');
 
     try {
@@ -320,8 +347,16 @@ async function callBackend(imageBytes) {
             canisterId: BACKEND_CANISTER_ID,
         });
 
-        // Call the backend service
-        const ageResult = await actor.predict_age_from_image(imageBytes);
+        // Call the new aligned inference method
+        const ageResult = await actor.predict_age_with_bbox(
+            frameObj.image_data,
+            frameObj.crop_width,
+            frameObj.crop_height,
+            frameObj.face_x,
+            frameObj.face_y,
+            frameObj.face_w,
+            frameObj.face_h,
+        );
 
         return ageResult;
     } catch (err) {
